@@ -1,14 +1,30 @@
 from flask import Flask, request, render_template_string, redirect, url_for
-from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.sql import StatementState
 import logging
 import os
 import time
+
+try:
+    from databricks.sdk import WorkspaceClient
+    from databricks.sdk.service.sql import StatementState
+except Exception:  # pragma: no cover - optional dependency during local development
+    WorkspaceClient = None
+    StatementState = None
 
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 app = Flask(__name__)
+
+
+def greet(name: str = "world") -> str:
+    """Return a friendly greeting used by the package tests and CLI."""
+    return f"Hello, {name}!"
+
+
+def get_workspace_client():
+    if WorkspaceClient is None:
+        raise RuntimeError("databricks-sdk is not installed or unavailable")
+    return WorkspaceClient()
 
 # Database configuration
 CATALOG = "workspace"
@@ -17,17 +33,30 @@ TABLE = "links"
 FULL_TABLE_NAME = f"{CATALOG}.{SCHEMA}.{TABLE}"
 SQL_WAREHOUSE_ID = "3d01a61a0711dab5"  # Serverless Starter Warehouse
 
-# Initialize Databricks client
-w = WorkspaceClient()
+# Initialize Databricks client lazily to keep local imports and tests robust.
+w = None
+
+
+def get_client():
+    global w
+    if w is None:
+        if WorkspaceClient is None:
+            raise RuntimeError("databricks-sdk is not installed or unavailable")
+        w = get_workspace_client()
+    return w
 
 # Helper function to execute SQL
 def execute_sql(sql_query, wait_for_result=True):
     try:
+        client = get_client()
+        if client is None:
+            raise RuntimeError("Databricks client is unavailable. Install databricks-sdk and configure access.")
+
         print(f"[DEBUG] Executing SQL: {sql_query[:100]}...")
         print(f"[DEBUG] Warehouse ID: {SQL_WAREHOUSE_ID}")
         
         # Execute SQL statement
-        result = w.statement_execution.execute_statement(
+        result = client.statement_execution.execute_statement(
             statement=sql_query,
             warehouse_id=SQL_WAREHOUSE_ID,
             catalog=CATALOG,
@@ -47,7 +76,7 @@ def execute_sql(sql_query, wait_for_result=True):
                 raise Exception(f"Statement timed out after {max_polls} seconds")
             time.sleep(1)
             poll_count += 1
-            result = w.statement_execution.get_statement(statement_id)
+            result = client.statement_execution.get_statement(statement_id)
             print(f"[DEBUG] Poll {poll_count}: {result.status.state}")
         
         print(f"[DEBUG] Final statement status: {result.status.state if result.status else 'no status'}")
