@@ -1,0 +1,7 @@
+command:
+  - python
+  - app.py
+
+api_scopes:
+  - sql.warehouse.data:read
+  - sql.warehouse.data:write
