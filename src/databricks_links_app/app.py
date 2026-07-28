@@ -1,17 +1,23 @@
 from flask import Flask, request, render_template_string, redirect, url_for
 import logging
 import os
-import time
+from urllib.parse import urlparse
 
 try:
-    from databricks.sdk import WorkspaceClient
-    from databricks.sdk.service.sql import StatementState
+    from dotenv import load_dotenv
 except Exception:  # pragma: no cover - optional dependency during local development
-    WorkspaceClient = None
-    StatementState = None
+    load_dotenv = None
+
+try:
+    from databricks import sql as databricks_sql
+except Exception:  # pragma: no cover - optional dependency during local development
+    databricks_sql = None
 
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
+
+if load_dotenv is not None:
+    load_dotenv()
 
 app = Flask(__name__)
 
@@ -21,11 +27,6 @@ def greet(name: str = "world") -> str:
     return f"Hello, {name}!"
 
 
-def get_workspace_client():
-    if WorkspaceClient is None:
-        raise RuntimeError("databricks-sdk is not installed or unavailable")
-    return WorkspaceClient()
-
 # Database configuration
 CATALOG = "workspace"
 SCHEMA = "bronze"
@@ -33,87 +34,67 @@ TABLE = "links"
 FULL_TABLE_NAME = f"{CATALOG}.{SCHEMA}.{TABLE}"
 SQL_WAREHOUSE_ID = "3d01a61a0711dab5"  # Serverless Starter Warehouse
 
+
+def get_sql_connection_config():
+    host = os.getenv("DATABRICKS_HOST", "").strip()
+    http_path = os.getenv("DATABRICKS_HTTP_PATH", f"/sql/1.0/warehouses/{SQL_WAREHOUSE_ID}").strip()
+    token = os.getenv("DATABRICKS_TOKEN", "").strip()
+
+    if not host or not http_path or not token:
+        return None
+
+    parsed_host = urlparse(host)
+    hostname = parsed_host.netloc or parsed_host.path
+    if not hostname:
+        return None
+
+    return {
+        "server_hostname": hostname,
+        "http_path": http_path,
+        "access_token": token,
+    }
+
+
 # Initialize Databricks client lazily to keep local imports and tests robust.
-w = None
+connection = None
 
 
-def get_client():
-    global w
-    if w is None:
-        if WorkspaceClient is None:
-            raise RuntimeError("databricks-sdk is not installed or unavailable")
-        w = get_workspace_client()
-    return w
+def get_connection():
+    global connection
+    if connection is None:
+        if databricks_sql is None:
+            raise RuntimeError("databricks-sql-connector is not installed or unavailable")
+
+        config = get_sql_connection_config()
+        if not config:
+            raise RuntimeError("Databricks SQL connection is not configured. Set DATABRICKS_HOST, DATABRICKS_HTTP_PATH, and DATABRICKS_TOKEN.")
+
+        connection = databricks_sql.connect(
+            server_hostname=config["server_hostname"],
+            http_path=config["http_path"],
+            access_token=config["access_token"],
+        )
+    return connection
 
 # Helper function to execute SQL
 def execute_sql(sql_query, wait_for_result=True):
     try:
-        client = get_client()
-        if client is None:
-            raise RuntimeError("Databricks client is unavailable. Install databricks-sdk and configure access.")
-
+        conn = get_connection()
+        cursor = conn.cursor()
         print(f"[DEBUG] Executing SQL: {sql_query[:100]}...")
-        print(f"[DEBUG] Warehouse ID: {SQL_WAREHOUSE_ID}")
-        
-        # Execute SQL statement
-        result = client.statement_execution.execute_statement(
-            statement=sql_query,
-            warehouse_id=SQL_WAREHOUSE_ID,
-            catalog=CATALOG,
-            schema=SCHEMA,
-            wait_timeout="50s"  # Increased timeout for warehouse startup
-        )
-        
-        statement_id = result.statement_id
-        print(f"[DEBUG] Statement ID: {statement_id}")
-        print(f"[DEBUG] Initial status: {result.status.state if result.status else 'no status'}")
-        
-        # Poll until statement completes (if PENDING/RUNNING)
-        max_polls = 60  # Max 60 seconds
-        poll_count = 0
-        while result.status and result.status.state in [StatementState.PENDING, StatementState.RUNNING]:
-            if poll_count >= max_polls:
-                raise Exception(f"Statement timed out after {max_polls} seconds")
-            time.sleep(1)
-            poll_count += 1
-            result = client.statement_execution.get_statement(statement_id)
-            print(f"[DEBUG] Poll {poll_count}: {result.status.state}")
-        
-        print(f"[DEBUG] Final statement status: {result.status.state if result.status else 'no status'}")
-        
-        # Check for errors
-        if result.status and result.status.state == StatementState.FAILED:
-            error_msg = result.status.error.message if result.status.error else 'Unknown error'
-            print(f"[ERROR] SQL execution failed: {error_msg}")
-            raise Exception(f"SQL execution failed: {error_msg}")
-        
-        if wait_for_result and result.result:
-            # Convert result to list of row objects
-            if result.result.data_array:
-                from datetime import datetime
-                columns = [col.name for col in result.manifest.schema.columns] if result.manifest and result.manifest.schema else []
-                rows = []
-                for row_data in result.result.data_array:
-                    row_dict = {}
-                    for idx, value in enumerate(row_data):
-                        if idx < len(columns):
-                            col_name = columns[idx]
-                            # Parse timestamp strings to datetime objects
-                            if value and isinstance(value, str) and ('created_at' in col_name or 'updated_at' in col_name):
-                                try:
-                                    row_dict[col_name] = datetime.fromisoformat(value.replace('Z', '+00:00'))
-                                except:
-                                    row_dict[col_name] = value
-                            else:
-                                row_dict[col_name] = value
-                    # Create a simple object to access via dot notation
-                    row_obj = type('Row', (), row_dict)
-                    rows.append(row_obj)
-                print(f"[DEBUG] Returning {len(rows)} rows")
-                return rows
-            return []
-        
-        print(f"[DEBUG] SQL executed successfully")
+
+        cursor.execute(sql_query)
+
+        statement_type = sql_query.strip().split()[0].upper() if sql_query.strip() else ""
+        if statement_type in {"INSERT", "UPDATE", "DELETE"}:
+            conn.commit()
+
+        if wait_for_result:
+            rows = cursor.fetchall()
+            cursor.close()
+            return rows
+
+        cursor.close()
         return None
     except Exception as e:
         print(f"[ERROR] SQL execution error: {type(e).__name__}: {e}")

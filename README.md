@@ -15,7 +15,7 @@ A Flask web application for managing and organizing web links with search functi
 - **Frontend**: HTML/CSS with Jinja2 templates
 - **Backend**: Flask (Python)
 - **Database**: Databricks Unity Catalog (`workspace.bronze.links` table)
-- **SQL Execution**: Databricks SQL Warehouse via WorkspaceClient SDK
+- SQL Execution: Databricks SQL Warehouse via the Databricks SQL connector
 
 ## Files
 
@@ -70,7 +70,22 @@ This Flask app can run on any Python hosting platform:
 
 - SQL injection mitigation via quote escaping
 - Input validation on all forms
-- Server-side authentication via Databricks SDK
+- Server-side authentication via Databricks SQL connector
+- Store the Databricks token in environment variables instead of source code
+
+### Secure token configuration
+
+Install the connector and set these environment variables before running the app:
+
+```bash
+pip install databricks-sql-connector
+
+export DATABRICKS_HOST="https://<your-workspace>.cloud.databricks.com"
+export DATABRICKS_HTTP_PATH="/sql/1.0/warehouses/<warehouse-id>"
+export DATABRICKS_TOKEN="<personal-access-token>"
+```
+
+For production, prefer a secret manager such as Databricks Secrets, AWS Secrets Manager, Azure Key Vault, or GitHub Actions secrets.
 
 ## Known Issues
 
