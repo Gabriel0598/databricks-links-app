@@ -13,6 +13,11 @@ try:
 except Exception:  # pragma: no cover - optional dependency during local development
     databricks_sql = None
 
+try:
+    from databricks.sql.exc import RequestError
+except Exception:  # pragma: no cover - optional dependency during local development
+    RequestError = None
+
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
@@ -59,6 +64,21 @@ def get_sql_connection_config():
 connection = None
 
 
+def _is_session_error(exc: Exception) -> bool:
+    """Detect errors that indicate the Databricks session/connection is no longer valid."""
+    if RequestError is not None and isinstance(exc, RequestError):
+        return True
+
+    message = str(exc).lower()
+    session_error_markers = (
+        "invalid sessionhandle",
+        "session is closed",
+        "session handle",
+        "connectionclosederror",
+    )
+    return any(marker in message for marker in session_error_markers)
+
+
 def get_connection():
     global connection
     if connection is None:
@@ -69,15 +89,31 @@ def get_connection():
         if not config:
             raise RuntimeError("Databricks SQL connection is not configured. Set DATABRICKS_HOST, DATABRICKS_HTTP_PATH, and DATABRICKS_TOKEN.")
 
-        connection = databricks_sql.connect(
-            server_hostname=config["server_hostname"],
-            http_path=config["http_path"],
-            access_token=config["access_token"],
-        )
+        try:
+            connection = databricks_sql.connect(
+                server_hostname=config["server_hostname"],
+                http_path=config["http_path"],
+                access_token=config["access_token"],
+            )
+        except Exception as e:
+            connection = None
+            print(f"[ERROR] Databricks connection error: {type(e).__name__}: {e}")
+            raise
     return connection
 
+
+def reset_connection():
+    """Close (if possible) and reset the global connection so the next call reconnects."""
+    global connection
+    if connection is not None:
+        try:
+            connection.close()
+        except Exception:
+            pass
+    connection = None
+
 # Helper function to execute SQL
-def execute_sql(sql_query, wait_for_result=True):
+def execute_sql(sql_query, wait_for_result=True, _retry=True):
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -98,6 +134,15 @@ def execute_sql(sql_query, wait_for_result=True):
         return None
     except Exception as e:
         print(f"[ERROR] SQL execution error: {type(e).__name__}: {e}")
+
+        if _is_session_error(e):
+            print("[WARN] Detected invalid/expired Databricks session. Resetting connection.")
+            reset_connection()
+
+            if _retry:
+                print("[INFO] Retrying query once with a fresh connection...")
+                return execute_sql(sql_query, wait_for_result=wait_for_result, _retry=False)
+
         import traceback
         traceback.print_exc()
         raise
