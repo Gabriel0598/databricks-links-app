@@ -312,6 +312,10 @@ SEARCH_TEMPLATE = '''
             {% if updated %}
             <div class="success">✓ Link updated successfully!</div>
             {% endif %}
+
+            {% if search_error %}
+            <div class="no-results">Search is temporarily unavailable. Please check the app's database connection and try again.</div>
+            {% endif %}
             
             <form method="GET" action="/search" class="search-box">
                 <input type="text" name="q" value="{{ query }}" placeholder="Search... (e.g., 'games')">
@@ -341,9 +345,9 @@ SEARCH_TEMPLATE = '''
                     </div>
                 </div>
                 {% endfor %}
-            {% elif query %}
+            {% elif query and not search_error %}
                 <div class="no-results">No results found for "{{ query }}"</div>
-            {% else %}
+            {% elif not query %}
                 <div class="no-results">Enter a search term to find links</div>
             {% endif %}
         </div>
@@ -385,6 +389,7 @@ def index():
 def search():
     query = request.args.get('q', '').strip()
     results = []
+    search_error = False
     updated = request.args.get('updated') == '1'
     
     if query:
@@ -403,11 +408,12 @@ def search():
             """)
             if results is None:
                 results = []
-        except Exception as e:
-            print(f"Search error: {e}")
+        except Exception:
+            logging.exception("Search query failed")
+            search_error = True
             results = []
     
-    return render_template_string(SEARCH_TEMPLATE, query=query, results=results, updated=updated)
+    return render_template_string(SEARCH_TEMPLATE, query=query, results=results, updated=updated, search_error=search_error)
 
 @app.route('/update/<int:link_id>', methods=['POST'])
 def update(link_id):
